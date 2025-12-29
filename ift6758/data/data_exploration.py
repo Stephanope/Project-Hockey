@@ -14,8 +14,8 @@ def get_game(game_year, game_type, game_number):
 
     Paramètres:
     game_year (int): Année ou la partie a eu lieu
-    game_type (int): Type de la partie (1 = pré-saison, 2 = saison régulière, 3 = playoffs, 4 = all-star)
-    game_numer (int): Numéro de la partie
+    game_type(int): Type de la partie (1 = pré-saison, 2 = saison régulière, 3 = playoffs, 4 = all-star)
+    game_numer (in t): Numéro de la partie
 
     Retourne:
     data (dict): Données de la partie spécifiée
@@ -64,6 +64,16 @@ def fetch_full_year_regular(year):
         if data is None:
             print(f"Arrêt à la partie {i}, fin de la saison détectée.")
             break
+
+def fetch_all_seasons_regular(start_year: int = 2016, end_year: int = 2023):
+    """
+    Récupère les données des parties de toutes les saisons de start_year jusqu'à end_year
+    Paramètre:
+    start_year (int): première saison qu'on fetch
+    end_year (int): dernière saison qu'on fetch
+    """
+    for year in range(start_year, end_year + 1):
+        fetch_full_year_regular(year)
 
 def play_context(data):
     """Récupère plusieurs données pour notre outil de déboggage interactif
