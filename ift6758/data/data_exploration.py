@@ -206,10 +206,9 @@ def get_goal_strength(play):
     else:
         return "EV"
 
-def create_plays_dataframe(plays):
+def create_plays_dataframe(plays, player_name):
     types = ['goal', 'shot-on-goal']
     filtered_plays = [p for p in plays if p.get('typeDescKey') in types]
-
 
     clean_data = []
     for play in filtered_plays:
@@ -233,8 +232,8 @@ def create_plays_dataframe(plays):
             'typeEvent': play.get('typeDescKey'),
             'x': details.get('xCoord'), 
             'y': details.get('yCoord'),
-            'shooter': get_player_name(shooter_id),
-            'goalie': get_player_name(goalie_id),
+            'shooter': get_player_name(shooter_id, player_name),
+            'goalie': get_player_name(goalie_id, player_name),
             'typeShot' : details.get('shotType'),
             'openNet' : is_empty_net,
             'goalStrenght' : get_goal_strength(play)
@@ -288,7 +287,7 @@ def load_cached_season_dataframe(year: int, game_type: int = 2) -> pd.DataFrame:
         global home, away, team_by_id, player_name
         home, away, team_by_id, player_name = play_context(game)
 
-        df_game = create_plays_dataframe(game["plays"])
+        df_game = create_plays_dataframe(game["plays"], player_name)
         game_id = game.get("id")
         df_game["gameId"] = game_id
         df_game["season"] = year
