@@ -163,8 +163,6 @@ def play_description(play, team_by_id, player_name):
             return type_ofplay or "event"
 
 def get_goal_strength(play):
-    if play.get('typeDescKey') != 'goal':
-        return ''
     
     # On récupère le code de situation (ex: "1541")
     situation_code = play.get('situationCode')
