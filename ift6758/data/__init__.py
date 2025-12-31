@@ -12,3 +12,4 @@ but both are still valid. You can read more about packages and modules here:
 https://docs.python.org/3/reference/import.html#regular-packages
 """
 from .question_1 import get_player_stats
+from .data_exploration import *
