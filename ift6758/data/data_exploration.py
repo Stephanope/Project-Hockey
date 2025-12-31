@@ -6,8 +6,23 @@ from ipywidgets import interact, interactive, fixed, interact_manual
 import ipywidgets as widgets
 import requests
 import json
+from typing import Iterator
 from pathlib import Path
 from IPython.display import clear_output
+import os
+
+def get_data_dir() -> Path:
+    # 1) variable d'env (meilleur)
+    env = os.environ.get("NHL_DATA_DIR")
+    if env:
+        return Path(env).expanduser().resolve()
+
+    # 2) fallback : racine du repo -> /data
+    # data_exploration.py est dans .../Project-Hockey/ift6758/data/data_exploration.py
+    project_root = Path(__file__).resolve().parents[2]
+    return (project_root / "data").resolve()
+
+DATA_DIR = get_data_dir()
 
 def get_game(game_year, game_type, game_number):
     """Récupère les infos d'une partie à partir de la chache ou de l'API
@@ -32,7 +47,7 @@ def get_game(game_year, game_type, game_number):
 
     # Création du path du fichier qui va stocker les données
     file_name = game_ID + ".json" 
-    base_path = Path("data") / str_year 
+    base_path = DATA_DIR / str_year 
     base_path.mkdir(parents=True, exist_ok=True) 
     complete_path = base_path / file_name 
 
@@ -99,7 +114,7 @@ def play_context(data):
 
     return home, away, team_by_id, player_name
 
-def get_player_name(player_id):
+def get_player_name(player_id, player_name: dict):
     """Récupère le nom d'un joueur s'il est connu
 
     Parmètre:
@@ -112,44 +127,36 @@ def get_player_name(player_id):
     return player_name.get(player_id, f"#{player_id}" if player_id is not None else "Unknown")
     
 def play_description(play, team_by_id, player_name):
-    """Retourne les données du jeu selon le type de ce dernier
-
-    Paramètres:
-    play (dict): Données complètes du jeu
-    team_by_id: Équipes du jeu
-    player_name: Joueurs du jeu
-    
-    """
     type_ofplay = play.get("typeDescKey", "")
     details = play.get("details", {}) or {}
 
     match type_ofplay:
         case "blocked-shot":
-            blocker = get_player_name(details.get('blockingPlayerId'))
-            shooter = get_player_name(details.get('shootingPlayerId'))
+            blocker = get_player_name(details.get('blockingPlayerId'), player_name)
+            shooter = get_player_name(details.get('shootingPlayerId'), player_name)
             return f"{blocker} blocked shot from {shooter}"
 
         case "shot-on-goal":
             shot_type = details.get("shotType")
             suffix = f" ({shot_type})" if shot_type else ""
-            return f"{get_player_name(details.get('shootingPlayerId'))} shot on goal{suffix}"
+            return f"{get_player_name(details.get('shootingPlayerId'), player_name)} shot on goal{suffix}"
 
         case "missed-shot":
             shot_type = details.get("shotType")
             suffix = f" ({shot_type})" if shot_type else ""
-            return f"{get_player_name(details.get('shootingPlayerId'))} missed shot{suffix}"
+            return f"{get_player_name(details.get('shootingPlayerId'), player_name)} missed shot{suffix}"
 
         case "goal":
-            scorer = get_player_name(details.get('scoringPlayerId'))
+            scorer = get_player_name(details.get('scoringPlayerId'), player_name)
             return f"GOAL — {scorer}"
 
         case "faceoff":
-            winner = get_player_name(details.get('winningPlayerId'))
+            winner = get_player_name(details.get('winningPlayerId'), player_name)
             return f"Faceoff won by {winner}"
 
         case "hit":
-            hitter = get_player_name(details.get('hittingPlayerId'))
-            hittee = get_player_name(details.get('hitteePlayerId'))
+            hitter = get_player_name(details.get('hittingPlayerId'), player_name)
+            hittee = get_player_name(details.get('hitteePlayerId'), player_name)
             return f"{hitter} hit {hittee}"
 
         case _:
@@ -199,10 +206,9 @@ def get_goal_strength(play):
     else:
         return "EV"
 
-def create_plays_dataframe(plays):
+def create_plays_dataframe(plays, player_name):
     types = ['goal', 'shot-on-goal']
     filtered_plays = [p for p in plays if p.get('typeDescKey') in types]
-
 
     clean_data = []
     for play in filtered_plays:
@@ -226,8 +232,8 @@ def create_plays_dataframe(plays):
             'typeEvent': play.get('typeDescKey'),
             'x': details.get('xCoord'), 
             'y': details.get('yCoord'),
-            'shooter': get_player_name(shooter_id),
-            'goalie': get_player_name(goalie_id),
+            'shooter': get_player_name(shooter_id, player_name),
+            'goalie': get_player_name(goalie_id, player_name),
             'typeShot' : details.get('shotType'),
             'openNet' : is_empty_net,
             'goalStrenght' : get_goal_strength(play)
@@ -236,29 +242,71 @@ def create_plays_dataframe(plays):
     new_df = pd.DataFrame(clean_data)
     return new_df
 
-def load_full_regular_season_dataframe(year, game_type=2, max_games=1312):
-    global data, all_plays, home, away, team_by_id, player_name
+    
+def iter_cached_games(year: int, game_type: int = 2):
+    base = DATA_DIR / str(year)
+    pattern = f"{year}{str(game_type).zfill(2)}*.json"
+    for p in sorted(base.glob(pattern)):
+        with open(p, "r", encoding="utf-8") as f:
+            yield json.load(f)
 
-    all_game_dfs = []
 
-    for game_number in range(1, max_games + 1):
-            data = get_game(year, game_type, game_number)
-            if not data or "plays" not in data:
-                continue
+def load_cached_plays_raw_dataframe(year: int, game_type: int = 2, max_games: int | None = None) -> pd.DataFrame:
+    rows = []
+    for k, game in enumerate(iter_cached_games(year, game_type), start=1):
+        if max_games is not None and k > max_games:
+            break
+        game_id = game.get("id")
+        for play in (game.get("plays") or []):
+            d = play.get("details") or {}
+            rows.append({
+                "gameId": game_id,
+                "eventId": play.get("eventId"),
+                "typeDescKey": play.get("typeDescKey"),
+                "period": (play.get("periodDescriptor") or {}).get("number"),
+                "timeInPeriod": play.get("timeInPeriod"),
+                "teamId": d.get("eventOwnerTeamId"),
+                "x": d.get("xCoord"),
+                "y": d.get("yCoord"),
+                "shotType": d.get("shotType"),
+            })
+    return pd.DataFrame(rows)
 
-            all_plays = data["plays"]
-            home, away, team_by_id, player_name = play_context(data)
+def load_cached_season_dataframe(year: int, game_type: int = 2) -> pd.DataFrame:
+    """
+    Charge une saison (regular=2 ou playoffs=3) depuis les JSON cachés et retourne un DF concaténé.
+    """
+    dfs = []
 
-            df_game = create_plays_dataframe(all_plays)
+    for game in iter_cached_games(year, game_type=game_type):
+        if not game or "plays" not in game:
+            continue
 
-            # Ajoute des colonnes utiles pour filtrer ensuite
-            game_id = data.get("id")
-            df_game["gameId"] = game_id
-            df_game["season"] = int(str(game_id)[:4]) if game_id else None
+        # IMPORTANT: le code utilise des globals (home/away/player_name),
+        # donc on appelle play_context à chaque game pour setter le contexte.
+        global home, away, team_by_id, player_name
+        home, away, team_by_id, player_name = play_context(game)
 
-            all_game_dfs.append(df_game)
+        df_game = create_plays_dataframe(game["plays"], player_name)
+        game_id = game.get("id")
+        df_game["gameId"] = game_id
+        df_game["season"] = year
+        df_game["gameType"] = game_type
 
-    return pd.concat(all_game_dfs, ignore_index=True)
+        dfs.append(df_game)
+
+    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+
+def load_cached_seasons_dataframe(start_year: int = 2016, end_year: int = 2023,
+                                 game_type: int = 2) -> pd.DataFrame:
+    dfs = []
+    for y in range(start_year, end_year + 1):
+        df_y = load_cached_season_dataframe(y, game_type=game_type)
+        if not df_y.empty:
+            dfs.append(df_y)
+    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+
+# Pour le notebook de visualisation
 
 def summarize_shots_and_goals_by_shot_type(season_dataframe: pd.DataFrame) -> pd.DataFrame:
     """
