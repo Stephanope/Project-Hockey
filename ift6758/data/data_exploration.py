@@ -10,6 +10,7 @@ from typing import Iterator
 from pathlib import Path
 from IPython.display import clear_output
 import os
+from typing import Iterable, Union
 
 def get_data_dir() -> Path:
     # 1) variable d'env (meilleur)
@@ -89,6 +90,30 @@ def fetch_all_seasons_regular(start_year: int = 2016, end_year: int = 2023):
     """
     for year in range(start_year, end_year + 1):
         fetch_full_year_regular(year)
+    
+def fetch_full_year_playoffs(year: int):
+    # séries “standards” : R1=8, R2=4, R3=2, Final=1
+    series_per_round = {1: 8, 2: 4, 3: 2, 4: 1}
+
+    for rnd, n_series in series_per_round.items():
+        for series in range(1, n_series + 1):
+            for game in range(1, 8):  # best-of-7
+                game_number = int(f"{rnd:02d}{series}{game}")  # 0111, 0112, ..., 0477
+                data = get_game(year, 3, game_number)
+
+                if data is None:
+                    break
+
+def fetch_all_seasons_playoffs(start_year: int = 2016, end_year: int = 2023):
+    """
+    Récupère les données des parties des playoffs de toutes les saisons de start_year jusqu'à end_year
+    Paramètre:
+    start_year (int): première saison qu'on fetch
+    end_year (int): dernière saison qu'on fetch
+    """
+    for year in range(start_year, end_year + 1):
+        fetch_full_year_playoffs(year)
+
 
 def play_context(data):
     """Récupère plusieurs données pour notre outil de déboggage interactif
@@ -163,8 +188,6 @@ def play_description(play, team_by_id, player_name):
             return type_ofplay or "event"
 
 def get_goal_strength(play):
-    if play.get('typeDescKey') != 'goal':
-        return ''
     
     # On récupère le code de situation (ex: "1541")
     situation_code = play.get('situationCode')
@@ -272,36 +295,39 @@ def load_cached_plays_raw_dataframe(year: int, game_type: int = 2, max_games: in
             })
     return pd.DataFrame(rows)
 
-def load_cached_season_dataframe(year: int, game_type: int = 2) -> pd.DataFrame:
+def load_cached_season_dataframe(year: int, game_types: Union[int, Iterable[int]] = (2, 3)) -> pd.DataFrame:
     """
-    Charge une saison (regular=2 ou playoffs=3) depuis les JSON cachés et retourne un DF concaténé.
+    Charge une saison depuis les JSON cachés et retourne un DF concaténé.
+    game_types: 2 (saison), 3 (playoffs), ou (2,3) pour les deux.
     """
+    # Permet de passer soit un int, soit une liste/tuple
+    if isinstance(game_types, int):
+        game_types = (game_types,)
+
     dfs = []
 
-    for game in iter_cached_games(year, game_type=game_type):
-        if not game or "plays" not in game:
-            continue
+    for gt in game_types:
+        for game in iter_cached_games(year, game_type=gt):
+            if not game or "plays" not in game:
+                continue
 
-        # IMPORTANT: le code utilise des globals (home/away/player_name),
-        # donc on appelle play_context à chaque game pour setter le contexte.
-        global home, away, team_by_id, player_name
-        home, away, team_by_id, player_name = play_context(game)
+            global home, away, team_by_id, player_name
+            home, away, team_by_id, player_name = play_context(game)
 
-        df_game = create_plays_dataframe(game["plays"], player_name)
-        game_id = game.get("id")
-        df_game["gameId"] = game_id
-        df_game["season"] = year
-        df_game["gameType"] = game_type
+            df_game = create_plays_dataframe(game["plays"], player_name)
+            df_game["gameId"] = game.get("id")
+            df_game["season"] = year
+            df_game["gameType"] = gt  # IMPORTANT: on met le bon type ici
 
-        dfs.append(df_game)
+            dfs.append(df_game)
 
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-def load_cached_seasons_dataframe(start_year: int = 2016, end_year: int = 2023,
-                                 game_type: int = 2) -> pd.DataFrame:
+
+def load_cached_seasons_dataframe(start_year: int = 2016, end_year: int = 2023, game_types: Union[int, Iterable[int]] = (2, 3)) -> pd.DataFrame:
     dfs = []
     for y in range(start_year, end_year + 1):
-        df_y = load_cached_season_dataframe(y, game_type=game_type)
+        df_y = load_cached_season_dataframe(y, game_types=game_types)
         if not df_y.empty:
             dfs.append(df_y)
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
