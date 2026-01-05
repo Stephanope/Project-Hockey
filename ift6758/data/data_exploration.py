@@ -11,109 +11,9 @@ from pathlib import Path
 from IPython.display import clear_output
 import os
 from typing import Iterable, Union
-
-def get_data_dir() -> Path:
-    # 1) variable d'env (meilleur)
-    env = os.environ.get("NHL_DATA_DIR")
-    if env:
-        return Path(env).expanduser().resolve()
-
-    # 2) fallback : racine du repo -> /data
-    # data_exploration.py est dans .../Project-Hockey/ift6758/data/data_exploration.py
-    project_root = Path(__file__).resolve().parents[2]
-    return (project_root / "data").resolve()
+from ift6758.data.nhl_api import get_data_dir
 
 DATA_DIR = get_data_dir()
-
-def get_game(game_year, game_type, game_number):
-    """Récupère les infos d'une partie à partir de la chache ou de l'API
-
-    Paramètres:
-    game_year (int): Année ou la partie a eu lieu
-    game_type(int): Type de la partie (1 = pré-saison, 2 = saison régulière, 3 = playoffs, 4 = all-star)
-    game_numer (in t): Numéro de la partie
-
-    Retourne:
-    data (dict): Données de la partie spécifiée
-    """
-
-    # Conversion des int en string pour l'API
-    str_year = str(game_year)
-    str_type = str(game_type).zfill(2) 
-    str_num = str(game_number).zfill(4) 
-
-    # Création de la requête GET
-    game_ID = str_year + str_type + str_num 
-    url = f"https://api-web.nhle.com/v1/gamecenter/{game_ID}/play-by-play"  
-
-    # Création du path du fichier qui va stocker les données
-    file_name = game_ID + ".json" 
-    base_path = DATA_DIR / str_year 
-    base_path.mkdir(parents=True, exist_ok=True) 
-    complete_path = base_path / file_name 
-
-    # Si les données sont présentes localement on les récupère directement
-    if complete_path.is_file():
-        with open(complete_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    # Sinon on fait une requête à l'API de la NHL
-    else:   
-        response = requests.get(url) 
-        if response.status_code == 200: 
-            data = response.json()     
-            with open(complete_path, 'w', encoding='utf-8') as f: 
-               json.dump(data, f, indent=4) 
-            return data
-        else: 
-            print(f"Erreur {response.status_code} lors du téléchargement.") 
-            return None  
-
-
-def fetch_full_year_regular(year):
-    """Récupère les données des parties d'une saison régulière complète
-
-    Paramètre:
-    year (int): Année de la saison régulière
-    """
-    for i in range(1, 1351): 
-        data = get_game(year, 2, i) 
-        if data is None:
-            print(f"Arrêt à la partie {i}, fin de la saison détectée.")
-            break
-
-def fetch_all_seasons_regular(start_year: int = 2016, end_year: int = 2023):
-    """
-    Récupère les données des parties de toutes les saisons de start_year jusqu'à end_year
-    Paramètre:
-    start_year (int): première saison qu'on fetch
-    end_year (int): dernière saison qu'on fetch
-    """
-    for year in range(start_year, end_year + 1):
-        fetch_full_year_regular(year)
-    
-def fetch_full_year_playoffs(year: int):
-    # séries “standards” : R1=8, R2=4, R3=2, Final=1
-    series_per_round = {1: 8, 2: 4, 3: 2, 4: 1}
-
-    for rnd, n_series in series_per_round.items():
-        for series in range(1, n_series + 1):
-            for game in range(1, 8):  # best-of-7
-                game_number = int(f"{rnd:02d}{series}{game}")  # 0111, 0112, ..., 0477
-                data = get_game(year, 3, game_number)
-
-                if data is None:
-                    break
-
-def fetch_all_seasons_playoffs(start_year: int = 2016, end_year: int = 2023):
-    """
-    Récupère les données des parties des playoffs de toutes les saisons de start_year jusqu'à end_year
-    Paramètre:
-    start_year (int): première saison qu'on fetch
-    end_year (int): dernière saison qu'on fetch
-    """
-    for year in range(start_year, end_year + 1):
-        fetch_full_year_playoffs(year)
-
 
 def play_context(data):
     """Récupère plusieurs données pour notre outil de déboggage interactif
@@ -355,3 +255,55 @@ def summarize_shots_and_goals_by_shot_type(season_dataframe: pd.DataFrame) -> pd
 
     summary_by_shot_type["goal_rate"] = summary_by_shot_type["goals"] / summary_by_shot_type["shots"]
     return summary_by_shot_type.sort_values("shots", ascending=False)
+
+def add_attack_sign(df,
+                    x_col="x", team_col="teamShot",
+                    game_col="gameId", period_col="period",
+                    event_col="typeEvent"):
+    ndf = df.copy()
+
+    shots = ndf[
+        ndf[event_col].isin({"shot-on-goal", "goal", "missed-shot"})
+        & ndf[x_col].notna()
+    ].copy()
+
+    attack = (
+        shots.groupby([game_col, period_col, team_col])[x_col]
+        .median()
+        .gt(0)
+        .astype(int)
+        .replace({0: -1, 1: 1})
+        .rename("attack_sign")
+        .reset_index()
+    )
+
+    ndf = ndf.merge(attack, on=[game_col, period_col, team_col], how="left")
+
+    ndf["attack_sign"] = (
+        ndf.groupby([game_col, team_col])["attack_sign"]
+        .transform(lambda s: s.ffill().bfill())
+    )
+
+    return ndf
+
+def bin_midpoint(interval):
+    return (interval.left + interval.right) / 2
+
+def new_variables(df, goal_x=89.0, goal_y=0.0,
+                  x_col="x", y_col="y",
+                  event_col="typeEvent", empty_col="openNet"):
+    ndf = add_attack_sign(df, x_col=x_col, team_col="teamShot",
+                          game_col="gameId", period_col="period", event_col=event_col)
+
+    ndf["x_adj"] = ndf[x_col] * ndf["attack_sign"]
+    ndf["y_adj"] = ndf[y_col] * ndf["attack_sign"]
+
+    dx = goal_x - ndf["x_adj"]
+    dy = ndf["y_adj"] - goal_y
+
+    ndf["shotDistance"] = np.sqrt(dx**2 + dy**2)
+    ndf["shotAngle"] = np.degrees(np.arctan2(dy.abs(), dx))
+    ndf["isGoal"] = ndf[event_col].astype(str).str.lower().eq("goal")
+    ndf["isEmpty"] = ndf[empty_col].fillna(False).astype(int).eq(1)
+
+    return ndf
