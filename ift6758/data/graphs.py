@@ -88,3 +88,25 @@ def plotly_team_dropdown(team_maps, team_games, x_edges, y_edges, rink_data, yea
         height=650
     )
     return fig
+
+def plot_goal_curve(y_true, y_proba, label):
+    """Calcule et trace la courbe cumulative pour un modèle donné."""
+    # Trier par probabilité décroissante
+    order = np.argsort(-y_proba)
+    y_sorted = np.asarray(y_true)[order].astype(int)
+
+    # Calculs cumulatifs
+    total_goals = y_sorted.sum()
+    cum_goals = np.cumsum(y_sorted)
+
+    if total_goals > 0:
+        cum_prop_percent = 100.0 * (cum_goals / total_goals)
+    else:
+        cum_prop_percent = np.zeros_like(cum_goals, dtype=float)
+
+    # Calcul de l'axe X (Percentile)
+    pct_shots_selected = (np.arange(1, len(y_sorted) + 1) / len(y_sorted)) * 100.0
+    shot_probability_percentile = 100.0 - pct_shots_selected
+
+    # Tracé
+    plt.plot(shot_probability_percentile, cum_prop_percent, label=label)

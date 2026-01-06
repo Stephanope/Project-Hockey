@@ -307,3 +307,33 @@ def new_variables(df, goal_x=89.0, goal_y=0.0,
     ndf["isEmpty"] = ndf[empty_col].fillna(False).astype(int).eq(1)
 
     return ndf
+
+def goal_rate_by_percentile(y_true, proba_goal, step=5):
+    validation_df = pd.DataFrame({
+        "is_goal": np.asarray(y_true).astype(int),
+        "proba_goal": np.asarray(proba_goal),
+    })
+
+    validation_df["percentile"] = validation_df["proba_goal"].rank(pct=True) * 100.0
+
+    percentile_bins = np.arange(0, 100 + step, step)
+    validation_df["percentile_bin"] = pd.cut(
+        validation_df["percentile"],
+        bins=percentile_bins,
+        include_lowest=True,
+        right=False
+    )
+
+    goal_rate_table = (
+        validation_df
+        .groupby("percentile_bin", observed=True)["is_goal"]
+        .mean()
+        .reset_index(name="goal_rate")
+    )
+
+    bin_midpoints = np.array([
+        interval.left + step / 2
+        for interval in goal_rate_table["percentile_bin"]
+    ])
+
+    return bin_midpoints, goal_rate_table["goal_rate"].to_numpy()
