@@ -130,7 +130,14 @@ def get_goal_strength(play):
     else:
         return "EV"
 
+def mmss_to_sec(mmss: str) -> int:
+    m, s = mmss.split(":")
+    return int(m) * 60 + int(s)
 
+def play_game_seconds(play) -> int:
+    period = (play.get("periodDescriptor") or {}).get("number", 1)
+    return (int(period) - 1) * 20 * 60 + mmss_to_sec(play.get("timeInPeriod"))
+    
 def time_between_events(current_play, last_play):
     """
     Retourne le temps (en secondes) entre deux événements
@@ -158,6 +165,41 @@ def distance_between_events(current_play, last_play):
         return None
 
     return math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+
+def skaters_from_situation(play):
+    code = play.get("situationCode")
+    if not code or len(code) != 4 or not code.isdigit():
+        return None, None
+    away_skaters = int(code[1])
+    home_skaters = int(code[2])
+    return away_skaters, home_skaters
+
+def friendly_opposing_skaters(play, owner_team_id, home_id, away_id):
+    away_s, home_s = skaters_from_situation(play)
+    if away_s is None:
+        return None, None
+    
+    if owner_team_id == home_id:
+        return home_s, away_s
+    elif owner_team_id == away_id:
+        return away_s, home_s
+    return None, None
+
+def is_pp_for_team(play, team_id, home_id, away_id):
+    code = play.get("situationCode")
+    if not code or len(code) != 4 or not code.isdigit():
+        return False
+    away_s = int(code[1])
+    home_s = int(code[2])
+
+    if team_id == home_id:
+        f, o = home_s, away_s
+    elif team_id == away_id:
+        f, o = away_s, home_s
+    else:
+        return False
+
+    return (f > o) and (o < 5)   # exclut 6v5
     
 
 def create_plays_dataframe(plays, player_name):
@@ -165,43 +207,76 @@ def create_plays_dataframe(plays, player_name):
     filtered_plays = [p for p in plays if p.get('typeDescKey') in types]
 
     clean_data = []
+    home_id = home.get('id')
+    away_id = away.get('id')
+
+    # start time du PP (en secondes de match)
+    pp_start = {home_id: None, away_id: None}
+
     for i, play in enumerate(plays):
+        # ✅ définir t pour TOUS les plays
+        t = play_game_seconds(play)
+
+        # ✅ update PP timer pour TOUS les plays (sinon tu “rates” le début/fin entre deux tirs)
+        for team_id in (home_id, away_id):
+            if is_pp_for_team(play, team_id, home_id, away_id):
+                if pp_start[team_id] is None:
+                    pp_start[team_id] = t
+            else:
+                pp_start[team_id] = None  # reset quand le PP expire
+
+        # on ne garde que goals/shots
         if play in filtered_plays:
             details = play.get('details', {})
             owner_id = details.get('eventOwnerTeamId')
-            
-            if owner_id == away.get('id'):
+
+            teamShot = None
+            if owner_id == away_id:
                 teamShot = away.get('abbrev')
-            elif owner_id == home.get('id'):
+            elif owner_id == home_id:
                 teamShot = home.get('abbrev')
-            
+
             shooter_id = details.get('shootingPlayerId') or details.get('scoringPlayerId')
             goalie_id = details.get('goalieInNetId')
             is_empty_net = (play.get('typeDescKey') == 'goal') and (goalie_id is None)
-            
+
+            friendly, opposing = friendly_opposing_skaters(play, owner_id, home_id, away_id)
+
+            # ✅ time in PP pour l’équipe qui fait l’event
+            time_in_pp = 0
+            if owner_id in pp_start and pp_start[owner_id] is not None:
+                time_in_pp = t - pp_start[owner_id]
+
+            prev = plays[i-1] if i > 0 else None
+
             clean_data.append({
                 'timeInPeriod': play.get('timeInPeriod'),
+                'gameSeconds': t,  # ✅ au lieu de rappeler play_game_seconds(play)
                 'period': (play.get('periodDescriptor') or {}).get('number', '?'),
                 'eventId': play.get('eventId'),
                 'teamShot': teamShot,
                 'typeEvent': play.get('typeDescKey'),
-                'x': details.get('xCoord'), 
+                'x': details.get('xCoord'),
                 'y': details.get('yCoord'),
                 'shooter': get_player_name(shooter_id, player_name),
                 'goalie': get_player_name(goalie_id, player_name),
-                'typeShot' : details.get('shotType'),
-                'openNet' : is_empty_net,
-                'goalStrenght' : get_goal_strength(play),
-                'lastEvent' : plays[i-1].get('typeDescKey'),
-                'lastEventX' : plays[i-1].get('details', {}).get('xCoord'),
-                'lastEventY' : plays[i-1].get('details', {}).get('yCoord'),
-                'timeSinceLastEvent' : time_between_events(play, plays[i-1]),
-                'distanceSinceLastEvent' : distance_between_events(play, plays[i-1]),
+                'typeShot': details.get('shotType'),
+                'openNet': is_empty_net,
+
+                'lastEvent': prev.get('typeDescKey') if prev else None,
+                'lastEventX': (prev.get('details', {}) or {}).get('xCoord') if prev else None,
+                'lastEventY': (prev.get('details', {}) or {}).get('yCoord') if prev else None,
+                'timeSinceLastEvent': time_between_events(play, prev) if prev else None,
+                'distanceSinceLastEvent': distance_between_events(play, prev) if prev else None,
+
+                'goalStrenght': get_goal_strength(play),
+                "friendlySkaters": friendly,
+                "opposingSkaters": opposing,
+                "timeInPowerPlay": time_in_pp,
             })
-    
+
     new_df = pd.DataFrame(clean_data)
     return new_df
-
     
 def iter_cached_games(year: int, game_type: int = 2):
     base = DATA_DIR / str(year)
@@ -392,6 +467,7 @@ def new_variables(df, goal_x=89.0, goal_y=0.0,
     ndf["speed"] = df["distanceSinceLastEvent"] / df["timeSinceLastEvent"]
 
     return ndf
+
 
 def goal_rate_by_percentile(y_true, proba_goal, step=5):
     validation_df = pd.DataFrame({
