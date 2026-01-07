@@ -12,6 +12,7 @@ from IPython.display import clear_output
 import os
 from typing import Iterable, Union
 from ift6758.data.nhl_api import get_data_dir
+import math
 
 DATA_DIR = get_data_dir()
 
@@ -129,38 +130,74 @@ def get_goal_strength(play):
     else:
         return "EV"
 
+
+def time_between_events(current_play, last_play):
+    """
+    Retourne le temps (en secondes) entre deux événements
+    supposés être dans la même période.
+    """
+
+    def to_seconds(play):
+        minutes, seconds = map(int, play["timeInPeriod"].split(":"))
+        return minutes * 60 + seconds
+
+    return to_seconds(current_play) - to_seconds(last_play)
+
+def distance_between_events(current_play, last_play):
+    """
+    Retourne la distance (en pieds) entre deux événements NHL.
+    Retourne None si les coordonnées sont manquantes.
+    """
+
+    try:
+        x1 = last_play["details"]["xCoord"]
+        y1 = last_play["details"]["yCoord"]
+        x2 = current_play["details"]["xCoord"]
+        y2 = current_play["details"]["yCoord"]
+    except KeyError:
+        return None
+
+    return math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+    
+
 def create_plays_dataframe(plays, player_name):
     types = ['goal', 'shot-on-goal']
     filtered_plays = [p for p in plays if p.get('typeDescKey') in types]
 
     clean_data = []
-    for play in filtered_plays:
-        details = play.get('details', {})
-        owner_id = details.get('eventOwnerTeamId')
-        
-        if owner_id == away.get('id'):
-            teamShot = away.get('abbrev')
-        elif owner_id == home.get('id'):
-            teamShot = home.get('abbrev')
-        
-        shooter_id = details.get('shootingPlayerId') or details.get('scoringPlayerId')
-        goalie_id = details.get('goalieInNetId')
-        is_empty_net = (play.get('typeDescKey') == 'goal') and (goalie_id is None)
-        
-        clean_data.append({
-            'timeInPeriod': play.get('timeInPeriod'),
-            'period': (play.get('periodDescriptor') or {}).get('number', '?'),
-            'eventId': play.get('eventId'),
-            'teamShot': teamShot,
-            'typeEvent': play.get('typeDescKey'),
-            'x': details.get('xCoord'), 
-            'y': details.get('yCoord'),
-            'shooter': get_player_name(shooter_id, player_name),
-            'goalie': get_player_name(goalie_id, player_name),
-            'typeShot' : details.get('shotType'),
-            'openNet' : is_empty_net,
-            'goalStrenght' : get_goal_strength(play)
-        })
+    for i, play in enumerate(plays):
+        if play in filtered_plays:
+            details = play.get('details', {})
+            owner_id = details.get('eventOwnerTeamId')
+            
+            if owner_id == away.get('id'):
+                teamShot = away.get('abbrev')
+            elif owner_id == home.get('id'):
+                teamShot = home.get('abbrev')
+            
+            shooter_id = details.get('shootingPlayerId') or details.get('scoringPlayerId')
+            goalie_id = details.get('goalieInNetId')
+            is_empty_net = (play.get('typeDescKey') == 'goal') and (goalie_id is None)
+            
+            clean_data.append({
+                'timeInPeriod': play.get('timeInPeriod'),
+                'period': (play.get('periodDescriptor') or {}).get('number', '?'),
+                'eventId': play.get('eventId'),
+                'teamShot': teamShot,
+                'typeEvent': play.get('typeDescKey'),
+                'x': details.get('xCoord'), 
+                'y': details.get('yCoord'),
+                'shooter': get_player_name(shooter_id, player_name),
+                'goalie': get_player_name(goalie_id, player_name),
+                'typeShot' : details.get('shotType'),
+                'openNet' : is_empty_net,
+                'goalStrenght' : get_goal_strength(play),
+                'lastEvent' : plays[i-1].get('typeDescKey'),
+                'lastEventX' : plays[i-1].get('details', {}).get('xCoord'),
+                'lastEventY' : plays[i-1].get('details', {}).get('yCoord'),
+                'timeSinceLastEvent' : time_between_events(play, plays[i-1]),
+                'distanceSinceLastEvent' : distance_between_events(play, plays[i-1]),
+            })
     
     new_df = pd.DataFrame(clean_data)
     return new_df
@@ -289,6 +326,51 @@ def add_attack_sign(df,
 def bin_midpoint(interval):
     return (interval.left + interval.right) / 2
 
+def calculate_angle_between_shots(df, goal_x=89.0, goal_y=0.0):
+    """
+    Même calcul, mais effectué ligne par ligne avec une boucle.
+    """
+    angles = []
+
+    # On itère sur chaque ligne du DataFrame (index, contenu de la ligne)
+    for index, row in df.iterrows():
+
+        if row["isRebound"] == 0:
+            angles.append(0.0)
+        else:
+            # 1. Vecteur dernier event -> but
+            v1x = goal_x - row["lastEventX"]
+            v1y = row["lastEventY"] - goal_y  # Note: Je garde ta logique de signe originale
+    
+            # 2. Vecteur tir courant -> but
+            v2x = goal_x - row["x_adj"]
+            v2y = row["y_adj"] - goal_y
+    
+            # 3. Calculs intermédiaires (Produit scalaire et Normes)
+            dot = v1x * v2x + v1y * v2y
+            norm1 = np.sqrt(v1x**2 + v1y**2)
+            norm2 = np.sqrt(v2x**2 + v2y**2)
+    
+            # 4. Calcul de l'angle avec sécurité
+            # Si une des normes est 0 (ex: tir depuis le centre du filet), on évite la division par 0
+            if norm1 == 0 or norm2 == 0:
+                angles.append(0.0)
+            else:
+                cos_val = dot / (norm1 * norm2)
+                
+                # Clip pour éviter les erreurs numériques (ex: 1.000000002 qui fait planter arccos)
+                if cos_val > 1.0:
+                    cos_val = 1.0
+                elif cos_val < -1.0:
+                    cos_val = -1.0
+                    
+                angle_rad = np.arccos(cos_val)
+                angle_deg = np.degrees(angle_rad)
+                angles.append(angle_deg)
+
+    # Une fois la boucle finie, on assigne la liste à la nouvelle colonne
+    return angles
+
 def new_variables(df, goal_x=89.0, goal_y=0.0,
                   x_col="x", y_col="y",
                   event_col="typeEvent", empty_col="openNet"):
@@ -305,6 +387,9 @@ def new_variables(df, goal_x=89.0, goal_y=0.0,
     ndf["shotAngle"] = np.degrees(np.arctan2(dy.abs(), dx))
     ndf["isGoal"] = ndf[event_col].astype(str).str.lower().eq("goal")
     ndf["isEmpty"] = ndf[empty_col].fillna(False).astype(int).eq(1)
+    ndf["isRebound"] = ((ndf["lastEvent"] == "shot-on-goal") & (ndf["timeSinceLastEvent"] <= 5)).astype(int)    
+    ndf["angleDifference"] = calculate_angle_between_shots(ndf)
+    ndf["speed"] = df["distanceSinceLastEvent"] / df["timeSinceLastEvent"]
 
     return ndf
 
