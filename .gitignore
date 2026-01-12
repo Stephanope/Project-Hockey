@@ -137,3 +137,5 @@ dmypy.json
 
 # Plotly HTML exports
 *.html
+
+wandb/
